@@ -2,7 +2,9 @@
 
 In all python scripts there are path can be changed to point to the checkpoints and places to save data and plots. One needs to generate checkpoints using scripts provided in the other folder.
 
-All Python scripts should be executed using the format ```./plot.sh *.py 4 6 100000 2048```, where the parameters correspond to a model checkpoint generated with depth=4, $n_{\text{heads}}=6$, 100000 training steps, and $m_{\text{test}}=2048$. **To obtain the checkpoint used in this section, one must additionally exclude the specific $m_{\text{test}}$ values of interest from the training set.**
+All Python scripts should be executed using the format ```./plot.sh *.py 4 6 100000 2048```, where the parameters correspond to a model checkpoint generated with depth=4, $n_{\text{heads}}=6$, 100000 training steps, and $m_{\text{test}}=2048$. 
+
+**To obtain the checkpoint used in this section, one must additionally exclude the specific $m_{\text{test}}$ values of interest from the training set.**
 
 List of python scripts and their corresponding Figure numbers:
 
