@@ -175,3 +175,20 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Project Specific
+datasets/
+results/
+err/
+out/
+chkpts/
+ckpts/
+plots/
+digits/
+prng-tests
+data
+*sh
+sync.sh
+flush.sh
+try.ipynb
+try.py
