@@ -16,7 +16,7 @@ from sympy import isprime
 from utils.prng_data import find_as, find_coprimes
 from utils.datasets import BaseBLCG
 from utils.gpt2 import GPT_oth_abacus, GPTConfig_abacus
-from utils.optimize import get_predictions
+from utils.eval import get_predictions
 
 def generate_powers_in_range(numbers, min_val, max_val):
     """Generate powers of given numbers within a specified range."""

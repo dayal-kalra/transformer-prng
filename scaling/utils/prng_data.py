@@ -1,5 +1,7 @@
-
+import os
+import pandas as pd
 import torch
+from torch.utils.data import Dataset
 from sympy import primefactors, gcd
 from itertools import *
 import numpy as np
@@ -155,7 +157,7 @@ def base_b_lcg(base: int=16, digits: int=2, p: int=None, length: int=8,
     array = np.zeros(digits * n * length)
     x = int(rng.integers(low=0, high=p))
     a = int(a)
-    c = int(c)  
+    c = int(c)  # avoid overflow
     
     for i in range(0, digits * n * length, digits):
         x = (a * x + c) % p

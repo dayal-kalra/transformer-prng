@@ -1,7 +1,8 @@
 import torch
 from torch.utils.data import Dataset
+import torch.nn.functional as F
 import numpy as np
-from utils.prng_data import *
+from .prng_data import *
 
 class LCG(Dataset):
     """
