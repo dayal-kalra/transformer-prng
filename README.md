@@ -1,5 +1,5 @@
 # (How) Can Transformers Predict Pseudo-Random Numbers?
-ICML 2024 accept(poster)
+ICML 2025 accept(poster)
 [![arXiv](https://img.shields.io/badge/arXiv-2502.10390-b31b1b.svg)](https://arxiv.org/abs/2502.10390)
 
 This repository contains the code and experiments for the paper *"(How) Can Transformers Predict Pseudo-Random Numbers?"* which investigates the ability of Transformer networks to learn and predict pseudo-random number sequences from Linear Congruential Generators (LCGs).
