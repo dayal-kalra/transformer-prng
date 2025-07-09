@@ -278,8 +278,8 @@ def main():
     parser.add_argument('--seq_len', type = int, default = 129)
     parser.add_argument('--n_a', type = int, default = 128)
     parser.add_argument('--n_c', type = int, default = 128)
-    parser.add_argument('--n_test_a', type = int, default = 256)
-    parser.add_argument('--n_test_c', type = int, default = 32)
+    parser.add_argument('--n_test_a', type = int, default = 16)
+    parser.add_argument('--n_test_c', type = int, default = 16)
     parser.add_argument('--n_example', type = int, default = 8)
 
     ### Model hyperparams
