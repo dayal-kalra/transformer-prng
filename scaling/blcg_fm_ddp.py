@@ -19,12 +19,16 @@ from utils.prng_data import find_as, find_coprimes
 from utils.datasets import BaseBLCG
 from utils.gpt2 import GPTConfig_abacus, GPT_oth_abacus
 
-def train(model, optimizer, scheduler, train_loader, test_loader, num_epoch, eval_results, device, train_sampler, config, rank):
+def is_distributed():
+    """Check if we're running in distributed mode"""
+    return "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1
+
+def train(model, optimizer, scheduler, train_loader, test_loader, num_epoch, eval_results, device, train_sampler, config, rank, is_ddp=True):
     """
     Main training loop with distributed training and evaluation
     
     Args:
-        model: DDP-wrapped neural network model
+        model: Neural network model (DDP-wrapped or regular)
         optimizer: Optimizer instance
         scheduler: Learning rate scheduler
         train_loader: DataLoader for training data
@@ -32,7 +36,8 @@ def train(model, optimizer, scheduler, train_loader, test_loader, num_epoch, eva
         num_epoch: Number of epochs to train
         eval_results: List to store evaluation metrics
         device: Training device (GPU)
-        train_sampler: DistributedSampler for training data
+        train_sampler: Sampler for training data (distributed or regular)
+        is_ddp: Whether model is wrapped with DDP
     """
     model.train()
     step = 0
@@ -41,7 +46,8 @@ def train(model, optimizer, scheduler, train_loader, test_loader, num_epoch, eva
     train_last_acc = 0
     
     for epoch in range(num_epoch):
-        train_sampler.set_epoch(epoch)
+        if is_ddp and hasattr(train_sampler, 'set_epoch'):
+            train_sampler.set_epoch(epoch)
         for x, y in train_loader:
             # Check steps before training
             if step >= config.num_steps:
@@ -50,7 +56,15 @@ def train(model, optimizer, scheduler, train_loader, test_loader, num_epoch, eva
             # Training step
             optimizer.zero_grad(set_to_none=True)
             x, y = x.to(device,non_blocking=True), y.to(device,non_blocking=True)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            
+            # Use appropriate autocast based on device
+            if device.startswith('cuda'):
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+            elif device == 'mps':
+                with torch.autocast(device_type="cpu", dtype=torch.float16):
+                    logits, loss = model(x, y)
+            else:
                 logits, loss = model(x, y) 
             
             # Compute metrics
@@ -79,7 +93,15 @@ def train(model, optimizer, scheduler, train_loader, test_loader, num_epoch, eva
                         batch_size = x.size(0)
                         total_test_samples += batch_size
                         x, y = x.to(device,non_blocking=True), y.to(device,non_blocking=True)
-                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        
+                        # Use appropriate autocast based on device
+                        if device.startswith('cuda'):
+                            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                                logits, loss = model(x, y)
+                        elif device == 'mps':
+                            with torch.autocast(device_type="cpu", dtype=torch.float16):
+                                logits, loss = model(x, y)
+                        else:
                             logits, loss = model(x, y) 
                         test_loss += loss.item() * batch_size
                         preds = logits.argmax(dim=-1)
@@ -91,22 +113,26 @@ def train(model, optimizer, scheduler, train_loader, test_loader, num_epoch, eva
                 train_acc /= config.eval_interval * config.batch_size * config.context_len
                 train_last_acc /= config.eval_interval * config.batch_size
 
-                # Average training metrics across processes
-                train_metrics = torch.tensor([train_loss, train_acc, train_last_acc], device=device)
-                dist.all_reduce(train_metrics, op=dist.ReduceOp.AVG)
-                train_loss, train_acc, train_last_acc = train_metrics.tolist()
+                if is_ddp:
+                    # Average training metrics across processes
+                    train_metrics = torch.tensor([train_loss, train_acc, train_last_acc], device=device)
+                    dist.all_reduce(train_metrics, op=dist.ReduceOp.AVG)
+                    train_loss, train_acc, train_last_acc = train_metrics.tolist()
 
-                # Sum test metrics and samples across processes
-                test_metrics = torch.tensor([test_loss, test_acc, test_last_acc, total_test_samples], device=device)
-                dist.all_reduce(test_metrics, op=dist.ReduceOp.SUM)
-                test_loss, test_acc, test_last_acc, total_samples = test_metrics.tolist()
+                    # Sum test metrics and samples across processes
+                    test_metrics = torch.tensor([test_loss, test_acc, test_last_acc, total_test_samples], device=device)
+                    dist.all_reduce(test_metrics, op=dist.ReduceOp.SUM)
+                    test_loss, test_acc, test_last_acc, total_samples = test_metrics.tolist()
+                else:
+                    # For single GPU, no reduction needed
+                    total_samples = total_test_samples
                 
                 # Normalize test metrics using total samples
                 test_loss /= total_samples
                 test_acc /= total_samples * config.context_len
                 test_last_acc /= total_samples
 
-                # Log results on rank 0
+                # Log results (on rank 0 for distributed, always for single GPU)
                 if rank == 0:
                     print(f"rank {rank} | step {step:4d} | epoch {epoch} | "
                           f"train loss: {train_loss:.6f} | test loss: {test_loss:.6f} | "
@@ -135,6 +161,17 @@ def setup_distributed(rank, world_size):
     torch.cuda.set_device(device)
     return local_rank, device
 
+def setup_single_gpu():
+    """Setup for single GPU training"""
+    if torch.cuda.is_available():
+        device = 'cuda:0'
+        torch.cuda.set_device(device)
+    elif torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
+    return 0, device
+
 def setup_random_seeds(seed):
     """Set random seeds for reproducibility"""
     torch.manual_seed(seed)
@@ -143,55 +180,67 @@ def setup_random_seeds(seed):
     np.random.seed(seed)
     torch.set_float32_matmul_precision("high")
 
-def create_datasets(config, rank, world_size, rng):
+def create_datasets(config, rank, world_size, rng, distributed=True, device='cuda'):
     """Create and return train/test datasets and loaders"""
     t0 = time.time()
-    n_test_a = 512
-    n_test_c = 64
     
     if rank == 0: print("calculating a and c")
-    a_list = find_as(config.p, rng=rng, num=config.n_a+n_test_a)
-    c_list = find_coprimes(config.p, rng=rng, num=config.n_c+n_test_c)
+    a_list = find_as(config.p, rng=rng, num=config.n_a+config.n_test_a)
+    c_list = find_coprimes(config.p, rng=rng, num=config.n_c+config.n_test_c)
     
-    assert len(a_list) >= config.n_a+n_test_a, "not enough a values"
-    assert len(c_list) >= config.n_c+n_test_c, "not enough c values"
+    assert len(a_list) >= config.n_a+config.n_test_a, "not enough a values"
+    assert len(c_list) >= config.n_c+config.n_test_c, "not enough c values"
     train_a, val_a = a_list[:config.n_a], a_list[config.n_a:]
     train_c, val_c = c_list[:config.n_c], c_list[config.n_c:]
 
     train_dataset = BaseBLCG(p=config.p,base=config.base,digits=config.digits,length=config.seq_len,a_list=train_a,c_list=train_c,rng=rng,num_examples=config.n_example)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset,
-                                                                    num_replicas=config.world_size,
-                                                                    rank=rank,
-                                                                    shuffle=True,
-                                                                    drop_last=True)
+    
+    if distributed:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset,
+                                                                        num_replicas=world_size,
+                                                                        rank=rank,
+                                                                        shuffle=True,
+                                                                        drop_last=True)
+    else:
+        train_sampler = None
 
+    # Use pin_memory only for CUDA
+    use_pin_memory = device.startswith('cuda')
+    
     train_loader = DataLoader(train_dataset,
                                 batch_size=config.batch_size,
                                 sampler=train_sampler,
+                                shuffle=(train_sampler is None),
                                 num_workers=8,
-                                pin_memory=True,
+                                pin_memory=use_pin_memory,
                                 persistent_workers=True,
-                                prefetch_factor=2)
+                                prefetch_factor=2,
+                                drop_last=True)
 
     # Create test dataset
     test_dataset = BaseBLCG(p=config.p, base=config.base, digits=config.digits, length=config.seq_len,
                            a_list=val_a, c_list=val_c, rng=rng, num_examples=config.n_example)
     
-    test_sampler = torch.utils.data.distributed.DistributedSampler(
-        test_dataset,
-        num_replicas=config.world_size,
-        rank=rank,
-        shuffle=False,
-        drop_last=True
-    )
+    if distributed:
+        test_sampler = torch.utils.data.distributed.DistributedSampler(
+            test_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            drop_last=True
+        )
+    else:
+        test_sampler = None
     
     test_loader = DataLoader(test_dataset,
                             batch_size=config.batch_size,
                             sampler=test_sampler,
+                            shuffle=False,
                             num_workers=8,
-                            pin_memory=True,
+                            pin_memory=use_pin_memory,
                             persistent_workers=True,
-                            prefetch_factor=2
+                            prefetch_factor=2,
+                            drop_last=True
                            )
 
     if rank == 0:
@@ -229,6 +278,8 @@ def main():
     parser.add_argument('--seq_len', type = int, default = 129)
     parser.add_argument('--n_a', type = int, default = 128)
     parser.add_argument('--n_c', type = int, default = 128)
+    parser.add_argument('--n_test_a', type = int, default = 256)
+    parser.add_argument('--n_test_c', type = int, default = 32)
     parser.add_argument('--n_example', type = int, default = 8)
 
     ### Model hyperparams
@@ -248,7 +299,7 @@ def main():
     parser.add_argument('--beta2', type = float, default = 0.98)
     ### Evaluation hyperparams
     parser.add_argument('--eval_interval', type = int, default = 1000)
-    parser.add_argument('--results_dir', type = str, default = 'results/1p')
+    parser.add_argument('--results_dir', type = str, default = 'results')
     parser.add_argument('--save_params', type = str, default = 'False')
 
     config = parser.parse_args()
@@ -257,11 +308,19 @@ def main():
         config.p = config.base ** config.digits
     assert config.p <= config.base ** config.digits, "p is too large for the base and digits"
     config.vocab_size = config.base
-    config.world_size = int(os.environ["WORLD_SIZE"])
-    rank = int(os.environ["SLURM_PROCID"])
     
-    # Setup distributed training
-    local_rank, device = setup_distributed(rank, config.world_size)
+    # Check if we're in distributed mode
+    distributed = is_distributed()
+    
+    if distributed:
+        config.world_size = int(os.environ["WORLD_SIZE"])
+        rank = int(os.environ["SLURM_PROCID"])
+        local_rank, device = setup_distributed(rank, config.world_size)
+    else:
+        config.world_size = 1
+        rank = 0
+        local_rank, device = setup_single_gpu()
+    
     setup_random_seeds(config.main_seed)
     
     # Create model and optimizer
@@ -274,8 +333,14 @@ def main():
         digits=config.digits
     )).to(device)
     
-    ddp_model = DDP(model, device_ids=[local_rank])
-    raw_model = ddp_model.module
+    # Wrap with DDP only if distributed
+    if distributed:
+        ddp_model = DDP(model, device_ids=[local_rank])
+        raw_model = ddp_model.module
+    else:
+        ddp_model = model
+        raw_model = model
+    
     optimizer = raw_model.configure_optimizers(
         weight_decay=config.weight_decay,
         learning_rate=config.lr_trgt,
@@ -309,24 +374,25 @@ def main():
     # Create datasets
     rng = np.random.default_rng(config.data_seed)
     train_sampler, train_loader, test_loader, train_dataset, test_dataset, train_a, train_c = create_datasets(
-        config, rank, config.world_size, rng
+        config, rank, config.world_size, rng, distributed, device
     )
     
     # Train model
     if rank == 0:
-        print("Starting training...")
+        print(f"Starting training... (distributed: {distributed}, device: {device})")
         t0 = time.time()
     
     eval_results = []
     num_epoch = np.ceil(config.num_steps / len(train_loader)).astype(int)
-    train(ddp_model, optimizer, scheduler, train_loader, test_loader, num_epoch, eval_results, device, train_sampler, config, rank)
+    train(ddp_model, optimizer, scheduler, train_loader, test_loader, num_epoch, eval_results, device, train_sampler, config, rank, distributed)
     
     # Save results on rank 0
     if rank == 0:
         print(f"Training completed in {time.time() - t0:.2f} seconds")
         save_results(config, raw_model, eval_results, train_dataset, test_dataset, train_a, train_c)
     
-    dist.destroy_process_group()
+    if distributed:
+        dist.destroy_process_group()
 
 
 
