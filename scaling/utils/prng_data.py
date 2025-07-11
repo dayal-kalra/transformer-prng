@@ -41,11 +41,16 @@ def find_as(p, limit=None, rng=np.random.default_rng(97), num=2000):
         # print(f"Requested {num} a values for p={p} but only {available_nums} are available")
         num = available_nums
 
-    # Generate unique random multipliers
-    k_list = rng.choice(range(1, limit // lcm), size=num, replace=False)
-
+    # Generate unique random multipliers (memory efficient)
+    k_set = set()
+    max_k = limit // lcm
+    
+    while len(k_set) < num:
+        k = rng.integers(1, max_k)
+        k_set.add(k)
+    
     # Calculate valid factors
-    result = [k * lcm + 1 for k in k_list]
+    result = [k * lcm + 1 for k in k_set]
     return result
 
 
